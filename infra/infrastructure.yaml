@@ -1,0 +1,145 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Network Infrastructure for AI Agent Demo'
+Parameters:
+  LatestAmiId:
+    Description: AMI for Bastion Host (default is latest AmaLinux2)
+    Type: 'AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>'
+    Default: '/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2'
+
+Resources:
+  # S3 Bucket for flow logs
+  FlowLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      VersioningConfiguration:
+        Status: Enabled
+
+  # VPC 1 in us-east-1
+  VPC1:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: Demo-VPC-1
+
+  VPC1PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC1
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: VPC1-Public-1
+  
+  # Internet Gateways
+  VPC1InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: VPC1-IGW
+
+  VPC1InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC1
+      InternetGatewayId: !Ref VPC1InternetGateway
+  
+  # Route Tables
+  VPC1PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC1
+      Tags:
+        - Key: Name
+          Value: VPC1-Public-RT
+
+  VPC1PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: VPC1InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref VPC1PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref VPC1InternetGateway
+
+  VPC1PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref VPC1PublicSubnet
+      RouteTableId: !Ref VPC1PublicRouteTable
+
+  WebServerSG1:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      VpcId: !Ref VPC1
+      GroupDescription: Enable SSH access via ports 22 IPv4 
+      SecurityGroupIngress: 
+        - Description: 'Allow HTTP IPv4 IN'
+          IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # Flow log configuration
+  FlowLog1:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      ResourceId: !Ref VPC1
+      ResourceType: VPC
+      TrafficType: ALL
+      LogDestinationType: s3
+      LogDestination: !Sub ${FlowLogsBucket.Arn}/vpc-flow-logs/
+      MaxAggregationInterval: 60
+      LogFormat: '${version} ${account-id} ${interface-id} ${srcaddr} ${dstaddr} ${srcport} ${dstport} ${protocol} ${packets} ${bytes} ${start} ${end} ${action} ${log-status} ${vpc-id} ${subnet-id} ${instance-id} ${tcp-flags} ${type} ${pkt-srcaddr} ${pkt-dstaddr} ${region} ${az-id} ${sublocation-type} ${sublocation-id}'
+
+  # CloudWatch Alarms
+  BandwidthAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: HighBandwidthUsage
+      MetricName: NetworkIn
+      Namespace: AWS/EC2
+      Statistic: Sum
+      Period: 300
+      EvaluationPeriods: 2
+      Threshold: 5000000
+      ComparisonOperator: GreaterThanThreshold
+
+  
+  # EC2 Instances
+  WebServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: t3.micro
+      ImageId: !Ref LatestAmiId
+      SubnetId: !Ref VPC1PublicSubnet
+      SecurityGroupIds: 
+        - !Ref WebServerSG1
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          echo "<h1>Hello from VPC 1</h1>" > /var/www/html/index.html
+      Tags:
+        - Key: Name
+          Value: WebServer-VPC1
+ 
+Outputs:
+  VPC1Id:
+      Description: VPC 1 ID
+      Value: !Ref VPC1
+
+  S3BucketName:
+      Description: S3 Bucket for flow logs
+      Value: !Ref FlowLogsBucket
+
+  WebServer1PublicIP:
+      Description: WebServer1 Public IP
+      Value: !GetAtt WebServer1.PublicIpAddress
